@@ -2,12 +2,11 @@ import streamlit as st
 from supabase import create_client
 import pandas as pd
 from datetime import datetime, date
-import io
+import streamlit.components.v1 as components
 
-# 嘗試引入 OCR 套件 (easyocr 或 pytesseract)，如果未安裝則提供友善提示
+# 嘗試引入 OCR 套件 (easyocr)
 try:
     import easyocr
-    # 初始化 easyocr 讀取器 (支援英文同數字，車牌最適合)
     @st.cache_resource
     def load_ocr_reader():
         return easyocr.Reader(['en'], gpu=False)
@@ -16,6 +15,25 @@ except ImportError:
     has_ocr = False
 
 st.set_page_config(page_title="汽車換油保養雲端紀錄", page_icon="🚗", layout="centered")
+
+# ==========================================
+# ⚡ 前端 JavaScript：強制手機鍵盤輸入自動轉大寫 (Caps Lock 效果)
+# ==========================================
+components.html("""
+<script>
+// 監聽網頁入面所有文字輸入框，自動將英文轉為大寫並套用 autocapitalize
+const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+inputs.forEach(input => {
+    input.setAttribute('autocapitalize', 'characters');
+    input.addEventListener('input', function (e) {
+        let start = this.selectionStart;
+        let end = this.selectionEnd;
+        this.value = this.value.toUpperCase();
+        this.setSelectionRange(start, end);
+    });
+});
+</script>
+""", height=0)
 
 # ==========================================
 # 🔒 私人密碼鎖驗證 (讀取雲端 APP_PASSWORD)
@@ -68,21 +86,45 @@ oil_records = res_oil.data
 existing_plates = sorted(list(set(r["license_plate"] for r in oil_records if r.get("license_plate"))))
 
 # ==========================================
-# 🔍 車牌、Invoice 單號及日期搜索區域
+# 🔍 搜索及篩選紀錄 (加入快速 OCR 搜索車牌)
 # ==========================================
 st.subheader("🔍 搜索及篩選紀錄")
 
+search_ocr_plate = ""
+with st.expander("📷 用鏡頭拍照 / 上傳相片來快速搜索車牌"):
+    search_cam = st.file_uploader("上傳車牌相片以進行搜索", type=["jpg", "jpeg", "png"], key="search_cam_uploader")
+    if search_cam is not None:
+        st.image(search_cam, caption="用於搜索的相片", width=250)
+        if st.button("🔍 辨識並套用車牌搜索"):
+            if not has_ocr:
+                st.warning("⚠️ 系統未安裝 easyocr。")
+            else:
+                with st.spinner("AI 正在辨識車牌中..."):
+                    try:
+                        reader = load_ocr_reader()
+                        results = reader.readtext(search_cam.getvalue())
+                        raw_text = "".join([res[1] for res in results]).upper().replace(" ", "")
+                        search_ocr_plate = "".join([c for c in raw_text if c.isalnum()])
+                        if search_ocr_plate:
+                            st.success(f"✅ 成功辨識出車牌：**{search_ocr_plate}**")
+                        else:
+                            st.warning("⚠️ 辨識唔到車牌文字。")
+                    except Exception as e:
+                        st.error(f"❌ 錯誤: {e}")
+
 s_col1, s_col2, s_col3 = st.columns([1.2, 1, 1.2])
 with s_col1:
+    default_search_val = search_ocr_plate if search_ocr_plate else ""
     search_input = st.text_input(
-        "🚘 輸入車牌號碼",
+        "🚘 輸入車牌號碼 (自動大階)",
+        value=default_search_val,
         placeholder="如: AB1234..."
     ).strip().upper().replace(" ", "")
 with s_col2:
     quick_select = st.selectbox("或揀選車牌", ["全部車牌"] + existing_plates)
 with s_col3:
     inv_search = st.text_input(
-        "🧾 輸入 Invoice 單號",
+        "🧾 輸入 Invoice 單號 (自動大階)",
         placeholder="如: INV-2026..."
     ).strip().upper()
 
@@ -101,16 +143,16 @@ with date_col2:
 # 篩選邏輯
 filtered_records = oil_records
 if search_input:
-    filtered_records = [r for r in filtered_records if search_input in (r.get("license_plate") or "").upper()]
+    filtered_records = [r for r in filtered_records if search_input in (r.get("license_plate"] or "").upper()]
 elif quick_select != "全部車牌":
-    filtered_records = [r for r in filtered_records if r.get("license_plate") == quick_select]
+    filtered_records = [r for r in filtered_records if r.get("license_plate"] == quick_select]
 
 if inv_search:
-    filtered_records = [r for r in filtered_records if inv_search in (r.get("invoice_no") or "").upper()]
+    filtered_records = [r for r in filtered_records if inv_search in (r.get("invoice_no"] or "").upper()]
 
 if date_mode == "指定單一日期":
     target_date_str = str(target_date)
-    filtered_records = [r for r in filtered_records if r.get("service_date") == target_date_str]
+    filtered_records = [r for r in filtered_records if r.get("service_date"] == target_date_str]
 elif date_mode == "日期範圍 (由...至...)":
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_str, end_str = str(date_range[0]), str(date_range[1])
@@ -127,47 +169,41 @@ if (search_input or quick_select != "全部車牌") and filtered_records:
     )
 
 # ==========================================
-# 1. 新增換油 / 保養紀錄 (含鏡頭 OCR 辨識 ＋ 鍵盤輸入)
+# 1. 新增換油 / 保養紀錄 (支援 OCR 拍照辨識)
 # ==========================================
 with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或鍵盤輸入)", expanded=not bool(oil_records)):
     
-    # 📸 鏡頭 OCR 辨識區塊
-    st.markdown("### 📷 車牌智能辨識 (可選)")
-    ocr_mode = st.radio("選擇輸入車牌方式", ["⌨️ 傳統鍵盤輸入", "📸 拍照 / 上傳車牌相片 OCR 辨識"], horizontal=True)
+    st.markdown("### 📷 車牌智能辨識 (新增用)")
+    ocr_mode = st.radio("選擇輸入車牌方式", ["⌨️ 傳統鍵盤輸入", "📸 拍照 / 上傳車牌相片 OCR 辨識"], horizontal=True, key="add_ocr_radio")
     
     detected_plate = ""
-    if ocr_mode == "📸 拍照 / 상傳車牌相片 OCR 辨識":
+    if ocr_mode == "📸 拍照 / 上傳車牌相片 OCR 辨識":
         if not has_ocr:
-            st.warning("⚠️ 系統尚未安裝 `easyocr` 套件，請先在 `requirements.txt` 加入 `easyocr`。現時將預設使用鍵盤輸入。")
+            st.warning("⚠️ 系統尚未安裝 `easyocr` 套件。")
         else:
-            cam_file = st.file_uploader("上傳車牌相片或即時拍照", type=["jpg", "jpeg", "png"])
+            cam_file = st.file_uploader("上傳車牌相片或即時拍照", type=["jpg", "jpeg", "png"], key="add_cam_uploader")
             if cam_file is not None:
-                st.image(cam_file, caption="已上傳的車牌相片", width=300)
-                if st.button("🔍 開始辨識車牌文字"):
+                st.image(cam_file, caption="已上傳的車牌相片", width=250)
+                if st.button("🔍 開始辨識車牌文字", key="btn_add_ocr"):
                     with st.spinner("AI 正在辨識車牌中..."):
                         try:
                             reader = load_ocr_reader()
-                            bytes_data = cam_file.getvalue()
-                            results = reader.readtext(bytes_data)
-                            # 提取所有辨識到的文字並串連
-                            recognized_texts = [res[1] for res in results]
-                            raw_text = "".join(recognized_texts).upper().replace(" ", "")
-                            # 過濾非英文字母及數字
+                            results = reader.readtext(cam_file.getvalue())
+                            raw_text = "".join([res[1] for res in results]).upper().replace(" ", "")
                             detected_plate = "".join([c for c in raw_text if c.isalnum()])
                             if detected_plate:
                                 st.success(f"✅ 成功辨識車牌：**{detected_plate}**")
                             else:
-                                st.warning("⚠️ 睇唔清車牌，請嘗試手動輸入或者重新影一張清晰嘅相片。")
+                                st.warning("⚠️ 辨識唔到車牌文字。")
                         except Exception as e:
-                            st.error(f"❌ 辨識失敗: {e}")
+                            st.error(f"❌ 失敗: {e}")
 
     with st.form("add_oil_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
         with col1:
-            # 如果 OCR 有成功辨識出車牌，自動帶入輸入框
             default_plate = detected_plate if detected_plate else (search_input if search_input else (quick_select if quick_select != "全部車牌" else ""))
-            plate_raw = st.text_input("車牌號碼 * (支援鍵盤輸入或上方 OCR)", value=default_plate, placeholder="如: AB1234")
-            inv_raw = st.text_input("Invoice 單據編號 *", placeholder="如: INV-20261023-01")
+            plate_raw = st.text_input("車牌號碼 * (自動大階)", value=default_plate, placeholder="如: AB1234")
+            inv_raw = st.text_input("Invoice 單據編號 * (自動大階)", placeholder="如: INV-20261023-01")
             s_date = st.date_input("保養日期 *", datetime.today())
             c_km = st.number_input("目前里數 (km) *", min_value=0, step=500)
         with col2:
@@ -176,7 +212,7 @@ with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或�
             cost = st.number_input("費用 ($ HKD)", min_value=0, step=50)
             o_filter = st.checkbox("已更換機油隔 (Oil Filter)", value=True)
 
-        notes = st.text_area("其他順便保養項目 (如：洗蝴蝶掩、換火咀、波箱油、冷氣隔)")
+        notes = st.text_area("其他順便保養項目")
 
         if st.form_submit_button("💾 儲存保養紀錄", use_container_width=True):
             clean_plate = plate_raw.strip().upper().replace(" ", "")
@@ -186,9 +222,9 @@ with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或�
             if not clean_plate or not clean_inv:
                 st.error("⚠️ 請必須填寫「車牌號碼」同埋「Invoice 單據編號」！")
             elif any(r["invoice_no"].upper() == clean_inv for r in oil_records):
-                st.error(f"❌ 儲存失敗：Invoice 單號 `{clean_inv}` 已經存在，單號唔可以重複！")
+                st.error(f"❌ 儲存失敗：Invoice 單號 `{clean_inv}` 已經存在！")
             elif any(r["license_plate"].upper() == clean_plate and r["service_date"] == date_str for r in oil_records):
-                st.error(f"❌ 儲存失敗：車牌 `{clean_plate}` 喺 `{date_str}` 已經有一筆保養紀錄，同車同日唔可以重複！")
+                st.error(f"❌ 儲存失敗：車牌 `{clean_plate}` 喺 `{date_str}` 已經有一筆紀錄！")
             else:
                 data = {
                     "license_plate": clean_plate,
@@ -202,7 +238,7 @@ with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或�
                     "notes": notes
                 }
                 supabase.table("oil_records").insert(data).execute()
-                st.success(f"✅ 已成功儲存車牌 `{clean_plate}` (單號: `{clean_inv}`) 嘅保養紀錄！")
+                st.success(f"✅ 已成功儲存車牌 `{clean_plate}` 嘅紀錄！")
                 st.rerun()
 
 # ==========================================
