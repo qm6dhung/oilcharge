@@ -39,38 +39,62 @@ def check_password():
 check_password()
 
 # ==========================================
-# ⚡ 前端 JavaScript：登入後全自動監測文字框並強制轉大階 (Caps Lock)
-# ==========================================
-components.html("""
-<script>
-function applyCapsLock() {
-    const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-    inputs.forEach(input => {
-        if (!input.dataset.capsApplied) {
-            input.setAttribute('autocapitalize', 'characters');
-            input.addEventListener('input', function () {
-                let start = this.selectionStart;
-                let end = this.selectionEnd;
-                this.value = this.value.toUpperCase();
-                this.setSelectionRange(start, end);
-            });
-            input.dataset.capsApplied = "true";
-        }
-    });
-}
-applyCapsLock();
-const observer = new MutationObserver(applyCapsLock);
-observer.observe(window.parent.document.body, { childList: true, subtree: true });
-</script>
-""", height=0)
-
-# ==========================================
-# 🧠 初始化 Session State (防止 OCR 辨識結果喺刷新時消失)
+# 🧠 初始化 Session State (保存 OCR 結果與鏡頭預設方向)
 # ==========================================
 if "search_ocr_plate" not in st.session_state:
     st.session_state.search_ocr_plate = ""
 if "add_ocr_plate" not in st.session_state:
     st.session_state.add_ocr_plate = ""
+if "cam_facing" not in st.session_state:
+    st.session_state.cam_facing = "environment"  # 預設使用後置鏡頭 ('environment' 為後置, 'user' 為前置)
+
+# ==========================================
+# ⚡ 前端 JavaScript：
+# 1. 強制文字框自動轉大階 (Caps Lock)
+# 2. 強制控制手機開啟「後置鏡頭」或「前置鏡頭」
+# ==========================================
+components.html(f"""
+<script>
+// 1. 自動大階監聽
+function applyCapsLock() {{
+    const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+    inputs.forEach(input => {{
+        if (!input.dataset.capsApplied) {{
+            input.setAttribute('autocapitalize', 'characters');
+            input.addEventListener('input', function () {{
+                let start = this.selectionStart;
+                let end = this.selectionEnd;
+                this.value = this.value.toUpperCase();
+                this.setSelectionRange(start, end);
+            }});
+            input.dataset.capsApplied = "true";
+        }}
+    }});
+}}
+applyCapsLock();
+const observer = new MutationObserver(applyCapsLock);
+observer.observe(window.parent.document.body, {{ childList: true, subtree: true }});
+
+// 2. 強制指定手機前後置鏡頭方向
+const parentNav = window.parent.navigator;
+if (parentNav.mediaDevices && parentNav.mediaDevices.getUserMedia) {{
+    if (!parentNav.mediaDevices._origGetUserMedia) {{
+        parentNav.mediaDevices._origGetUserMedia = parentNav.mediaDevices.getUserMedia.bind(parentNav.mediaDevices);
+    }}
+    window.parent._preferredFacingMode = "{st.session_state.cam_facing}";
+    parentNav.mediaDevices.getUserMedia = function(constraints) {{
+        if (constraints && constraints.video) {{
+            if (typeof constraints.video === 'boolean') {{
+                constraints.video = {{ facingMode: window.parent._preferredFacingMode }};
+            }} else if (typeof constraints.video === 'object' && !constraints.video.deviceId) {{
+                constraints.video.facingMode = window.parent._preferredFacingMode;
+            }}
+        }}
+        return parentNav.mediaDevices._origGetUserMedia(constraints);
+    }};
+}}
+</script>
+""", height=0)
 
 # 定義通用 OCR 辨識函數
 def recognize_plate_from_bytes(image_bytes):
@@ -108,7 +132,7 @@ oil_records = res_oil.data or []
 existing_plates = sorted(list(set(r["license_plate"] for r in oil_records if r.get("license_plate"))))
 
 # ==========================================
-# 🔍 搜索及篩選紀錄 (加入快速 OCR 搜索車牌)
+# 🔍 搜索及篩選紀錄 (加入快速 OCR 搜索車牌 ＋ 前後鏡頭切換)
 # ==========================================
 st.subheader("🔍 搜索及篩選紀錄")
 
@@ -117,7 +141,24 @@ with st.expander("📷 用鏡頭拍照 / 上傳相片來快速搜索車牌"):
         st.warning("⚠️ 系統未安裝 `easyocr`，請確認 `requirements.txt` 已加入 `easyocr`。")
     else:
         s_cam_mode = st.radio("選擇相片來源", ["📸 開啟相機即時影", "📂 從手機相簿上傳"], horizontal=True, key="s_cam_mode")
-        search_img = st.camera_input("對準車牌拍照", key="s_cam") if s_cam_mode == "📸 開啟相機即時影" else st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="s_upload")
+        
+        if s_cam_mode == "📸 開啟相機即時影":
+            s_lens = st.radio(
+                "🔄 選擇相機鏡頭方向",
+                ["📷 後置鏡頭 (影車牌)", "🤳 前置鏡頭"],
+                index=0 if st.session_state.cam_facing == "environment" else 1,
+                horizontal=True,
+                key="s_lens_radio"
+            )
+            new_facing = "environment" if "後置" in s_lens else "user"
+            if new_facing != st.session_state.cam_facing:
+                st.session_state.cam_facing = new_facing
+                st.rerun()
+            
+            # 用 key 綁定鏡頭方向，切換時自動刷新相機組件
+            search_img = st.camera_input("對準車牌拍照 (亦可按畫面右上角 🔄 切換)", key=f"s_cam_{st.session_state.cam_facing}")
+        else:
+            search_img = st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="s_upload")
         
         if search_img is not None:
             if st.button("🔍 辨識並套用車牌搜索", use_container_width=True):
@@ -188,7 +229,7 @@ if (search_input or quick_select != "全部車牌") and filtered_records:
     )
 
 # ==========================================
-# 1. 新增換油 / 保養紀錄 (支援 OCR 拍照辨識)
+# 1. 新增換油 / 保養紀錄 (支援 OCR 拍照辨識 ＋ 前後鏡頭切換)
 # ==========================================
 with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或鍵盤輸入)", expanded=not bool(oil_records)):
     
@@ -199,7 +240,23 @@ with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或�
         if not has_ocr:
             st.warning("⚠️ 系統尚未安裝 `easyocr` 套件。")
         else:
-            cam_file = st.camera_input("請對準車牌拍照", key="add_cam") if ocr_mode == "📸 鏡頭拍照 OCR 辨識" else st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="add_upload")
+            if ocr_mode == "📸 鏡頭拍照 OCR 辨識":
+                a_lens = st.radio(
+                    "🔄 選擇相機鏡頭方向",
+                    ["📷 後置鏡頭 (影車牌)", "🤳 前置鏡頭"],
+                    index=0 if st.session_state.cam_facing == "environment" else 1,
+                    horizontal=True,
+                    key="add_lens_radio"
+                )
+                new_facing_add = "environment" if "後置" in a_lens else "user"
+                if new_facing_add != st.session_state.cam_facing:
+                    st.session_state.cam_facing = new_facing_add
+                    st.rerun()
+                
+                cam_file = st.camera_input("請對準車牌拍照 (亦可按畫面右上角 🔄 切換)", key=f"add_cam_{st.session_state.cam_facing}")
+            else:
+                cam_file = st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="add_upload")
+                
             if cam_file is not None:
                 if st.button("🔍 開始辨識車牌文字", key="btn_add_ocr", use_container_width=True):
                     with st.spinner("AI 正在辨識車牌中..."):
