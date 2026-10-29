@@ -2,6 +2,18 @@ import streamlit as st
 from supabase import create_client
 import pandas as pd
 from datetime import datetime, date
+import io
+
+# 嘗試引入 OCR 套件 (easyocr 或 pytesseract)，如果未安裝則提供友善提示
+try:
+    import easyocr
+    # 初始化 easyocr 讀取器 (支援英文同數字，車牌最適合)
+    @st.cache_resource
+    def load_ocr_reader():
+        return easyocr.Reader(['en'], gpu=False)
+    has_ocr = True
+except ImportError:
+    has_ocr = False
 
 st.set_page_config(page_title="汽車換油保養雲端紀錄", page_icon="🚗", layout="centered")
 
@@ -60,7 +72,6 @@ existing_plates = sorted(list(set(r["license_plate"] for r in oil_records if r.g
 # ==========================================
 st.subheader("🔍 搜索及篩選紀錄")
 
-# 第一行：車牌搜索 ＋ 下拉快選 ＋ Invoice 單號搜索
 s_col1, s_col2, s_col3 = st.columns([1.2, 1, 1.2])
 with s_col1:
     search_input = st.text_input(
@@ -75,7 +86,6 @@ with s_col3:
         placeholder="如: INV-2026..."
     ).strip().upper()
 
-# 第二行：日期搜索
 date_col1, date_col2 = st.columns([1, 2])
 with date_col1:
     date_mode = st.selectbox("📅 日期篩選模式", ["不限日期", "指定單一日期", "日期範圍 (由...至...)"])
@@ -88,32 +98,24 @@ with date_col2:
     else:
         st.text_input("目前顯示", value="所有日期嘅保養紀錄", disabled=True)
 
-# 1. 根據車牌過濾紀錄
+# 篩選邏輯
 filtered_records = oil_records
 if search_input:
     filtered_records = [r for r in filtered_records if search_input in (r.get("license_plate") or "").upper()]
 elif quick_select != "全部車牌":
     filtered_records = [r for r in filtered_records if r.get("license_plate") == quick_select]
 
-# 2. 根據 Invoice 單號關鍵字過濾紀錄
 if inv_search:
     filtered_records = [r for r in filtered_records if inv_search in (r.get("invoice_no") or "").upper()]
 
-# 3. 根據日期過濾紀錄
-date_tag = ""
 if date_mode == "指定單一日期":
     target_date_str = str(target_date)
     filtered_records = [r for r in filtered_records if r.get("service_date") == target_date_str]
-    date_tag = f"_{target_date_str}"
 elif date_mode == "日期範圍 (由...至...)":
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_str, end_str = str(date_range[0]), str(date_range[1])
         filtered_records = [r for r in filtered_records if start_str <= r.get("service_date", "") <= end_str]
-        date_tag = f"_{start_str}_to_{end_str}"
-    else:
-        st.caption("⚠️ 請喺日曆點選埋「結束日期」以完成範圍篩選。")
 
-# 當鎖定某個車牌時，置頂顯示該車嘅最新換油狀態及總保養次數
 if (search_input or quick_select != "全部車牌") and filtered_records:
     latest = filtered_records[0]
     target_plate = latest["license_plate"]
@@ -123,18 +125,48 @@ if (search_input or quick_select != "全部車牌") and filtered_records:
         f"📌 **最近一次保養**：{latest['service_date']} ｜ 單號：`{latest['invoice_no']}` ｜ 當時里數：`{latest['current_km']:,} km`\n\n"
         f"🔔 **下次換油目標**：**`{latest['next_km']:,} km`**"
     )
-elif (search_input or inv_search or date_mode != "不限日期") and not filtered_records:
-    st.warning("⚠️ 搵唔到符合目前「車牌 / 單號 / 日期」條件嘅保養紀錄。")
 
 # ==========================================
-# 1. 新增換油 / 保養紀錄 (含防撞單號及防同日重複檢查)
+# 1. 新增換油 / 保養紀錄 (含鏡頭 OCR 辨識 ＋ 鍵盤輸入)
 # ==========================================
-with st.expander("➕ 新增換油 / 保養紀錄", expanded=not bool(oil_records)):
+with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或鍵盤輸入)", expanded=not bool(oil_records)):
+    
+    # 📸 鏡頭 OCR 辨識區塊
+    st.markdown("### 📷 車牌智能辨識 (可選)")
+    ocr_mode = st.radio("選擇輸入車牌方式", ["⌨️ 傳統鍵盤輸入", "📸 拍照 / 上傳車牌相片 OCR 辨識"], horizontal=True)
+    
+    detected_plate = ""
+    if ocr_mode == "📸 拍照 / 상傳車牌相片 OCR 辨識":
+        if not has_ocr:
+            st.warning("⚠️ 系統尚未安裝 `easyocr` 套件，請先在 `requirements.txt` 加入 `easyocr`。現時將預設使用鍵盤輸入。")
+        else:
+            cam_file = st.file_uploader("上傳車牌相片或即時拍照", type=["jpg", "jpeg", "png"])
+            if cam_file is not None:
+                st.image(cam_file, caption="已上傳的車牌相片", width=300)
+                if st.button("🔍 開始辨識車牌文字"):
+                    with st.spinner("AI 正在辨識車牌中..."):
+                        try:
+                            reader = load_ocr_reader()
+                            bytes_data = cam_file.getvalue()
+                            results = reader.readtext(bytes_data)
+                            # 提取所有辨識到的文字並串連
+                            recognized_texts = [res[1] for res in results]
+                            raw_text = "".join(recognized_texts).upper().replace(" ", "")
+                            # 過濾非英文字母及數字
+                            detected_plate = "".join([c for c in raw_text if c.isalnum()])
+                            if detected_plate:
+                                st.success(f"✅ 成功辨識車牌：**{detected_plate}**")
+                            else:
+                                st.warning("⚠️ 睇唔清車牌，請嘗試手動輸入或者重新影一張清晰嘅相片。")
+                        except Exception as e:
+                            st.error(f"❌ 辨識失敗: {e}")
+
     with st.form("add_oil_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
         with col1:
-            default_plate = search_input if search_input else (quick_select if quick_select != "全部車牌" else "")
-            plate_raw = st.text_input("車牌號碼 *", value=default_plate, placeholder="如: AB1234")
+            # 如果 OCR 有成功辨識出車牌，自動帶入輸入框
+            default_plate = detected_plate if detected_plate else (search_input if search_input else (quick_select if quick_select != "全部車牌" else ""))
+            plate_raw = st.text_input("車牌號碼 * (支援鍵盤輸入或上方 OCR)", value=default_plate, placeholder="如: AB1234")
             inv_raw = st.text_input("Invoice 單據編號 *", placeholder="如: INV-20261023-01")
             s_date = st.date_input("保養日期 *", datetime.today())
             c_km = st.number_input("目前里數 (km) *", min_value=0, step=500)
@@ -151,7 +183,6 @@ with st.expander("➕ 新增換油 / 保養紀錄", expanded=not bool(oil_record
             clean_inv = inv_raw.strip().upper()
             date_str = str(s_date)
 
-            # 檢查必填欄位及重複規則
             if not clean_plate or not clean_inv:
                 st.error("⚠️ 請必須填寫「車牌號碼」同埋「Invoice 單據編號」！")
             elif any(r["invoice_no"].upper() == clean_inv for r in oil_records):
@@ -179,7 +210,6 @@ with st.expander("➕ 新增換油 / 保養紀錄", expanded=not bool(oil_record
 # ==========================================
 st.subheader("📋 保養紀錄列表及統計")
 if filtered_records:
-    # 💰 自動計算目前篩選結果嘅總費用及平均消費
     total_cost = sum(int(r.get("cost") or 0) for r in filtered_records)
     record_count = len(filtered_records)
     avg_cost = int(total_cost / record_count) if record_count > 0 else 0
@@ -196,11 +226,10 @@ if filtered_records:
     display_oil.columns = ["ID", "車牌", "Invoice 單號", "日期", "當時里數", "下次里數", "機油規格", "油隔", "費用($)", "備註"]
     st.dataframe(display_oil, use_container_width=True, hide_index=True)
 
-    # 📥 匯出 CSV 備份按鈕 (連同車牌、單號與日期範圍自動命名檔案)
     csv_data = display_oil.to_csv(index=False).encode("utf-8-sig")
     plate_tag = search_input or (quick_select if quick_select != "全部車牌" else "ALL")
     inv_tag = f"_{inv_search}" if inv_search else ""
-    file_tag = f"{plate_tag}{inv_tag}{date_tag}"
+    file_tag = f"{plate_tag}{inv_tag}"
     st.download_button(
         label=f"📥 匯出目前篩選列表 ({file_tag}) 為 CSV 備份 (Excel 適用)",
         data=csv_data,
@@ -208,74 +237,5 @@ if filtered_records:
         mime="text/csv",
         use_container_width=True
     )
-
-    # ==========================================
-    # 3. 修改或刪除過往保養紀錄 (同樣支援防撞檢查)
-    # ==========================================
-    with st.expander("✏️ 修改或刪除過往保養紀錄"):
-        record_options = {
-            r["id"]: f"[{r['license_plate']}] {r['service_date']} | 單號: {r['invoice_no']} ($ {int(r.get('cost') or 0):,})"
-            for r in filtered_records
-        }
-        selected_id = st.selectbox(
-            "選擇要處理嘅紀錄",
-            options=list(record_options.keys()),
-            format_func=lambda x: record_options[x]
-        )
-        target_rec = next(r for r in filtered_records if r["id"] == selected_id)
-
-        with st.form("edit_oil_form"):
-            e_col1, e_col2 = st.columns(2)
-            with e_col1:
-                edit_plate = st.text_input("車牌號碼 *", value=target_rec["license_plate"])
-                edit_inv = st.text_input("Invoice 單據編號 *", value=target_rec["invoice_no"])
-                edit_date = st.date_input("保養日期 *", datetime.strptime(target_rec["service_date"], "%Y-%m-%d"))
-                edit_ckm = st.number_input("當時里數 (km)", min_value=0, value=int(target_rec["current_km"]), step=500)
-            with e_col2:
-                edit_nkm = st.number_input("下次換油里數 (km)", min_value=0, value=int(target_rec["next_km"]), step=500)
-                edit_spec = st.text_input("機油牌子及黏度", value=target_rec["oil_spec"] or "")
-                edit_cost = st.number_input("費用 ($ HKD)", min_value=0, value=int(target_rec["cost"] or 0), step=50)
-                edit_filter = st.checkbox("已更換機油隔", value=bool(target_rec["oil_filter"]))
-
-            edit_notes = st.text_area("備註", value=target_rec["notes"] or "")
-
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                update_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
-            with btn_col2:
-                delete_btn = st.form_submit_button("🗑️ 刪除此紀錄", type="primary", use_container_width=True)
-
-            if update_btn:
-                c_plate = edit_plate.strip().upper().replace(" ", "")
-                c_inv = edit_inv.strip().upper()
-                c_date = str(edit_date)
-
-                other_records = [r for r in oil_records if r["id"] != selected_id]
-                if not c_plate or not c_inv:
-                    st.error("⚠️ 車牌號碼同埋 Invoice 單據編號唔可以留空！")
-                elif any(r["invoice_no"].upper() == c_inv for r in other_records):
-                    st.error(f"❌ 修改失敗：Invoice 單號 `{c_inv}` 已經被其他紀錄使用！")
-                elif any(r["license_plate"].upper() == c_plate and r["service_date"] == c_date for r in other_records):
-                    st.error(f"❌ 修改失敗：車牌 `{c_plate}` 喺 `{c_date}` 已經有另一筆紀錄！")
-                else:
-                    updated_data = {
-                        "license_plate": c_plate,
-                        "invoice_no": c_inv,
-                        "service_date": c_date,
-                        "current_km": edit_ckm,
-                        "next_km": edit_nkm,
-                        "oil_spec": edit_spec,
-                        "oil_filter": edit_filter,
-                        "cost": edit_cost,
-                        "notes": edit_notes
-                    }
-                    supabase.table("oil_records").update(updated_data).eq("id", selected_id).execute()
-                    st.success(f"✅ 已成功更新單號 `{c_inv}` 嘅紀錄！")
-                    st.rerun()
-
-            if delete_btn:
-                supabase.table("oil_records").delete().eq("id", selected_id).execute()
-                st.warning(f"🗑️ 已刪除單號 `{target_rec['invoice_no']}` 嘅紀錄！")
-                st.rerun()
 else:
     st.write("暫時未有符合條件嘅換油紀錄。")
