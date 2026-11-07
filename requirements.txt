@@ -1,5 +1,3 @@
 streamlit
 supabase
 pandas
-easyocr
-opencv-python-headless
