@@ -4,17 +4,24 @@ import pandas as pd
 from datetime import datetime, date
 import streamlit.components.v1 as components
 
-# 嘗試引入 OCR 套件 (easyocr)
-try:
-    import easyocr
-    @st.cache_resource
-    def load_ocr_reader():
-        return easyocr.Reader(['en'], gpu=False)
-    has_ocr = True
-except ImportError:
-    has_ocr = False
-
 st.set_page_config(page_title="汽車換油保養雲端紀錄", page_icon="🚗", layout="centered")
+
+# ==========================================
+# 🎨 CSS：
+# 1. 隱藏「Press Enter to apply」提示字
+# 2. 強制所有文字輸入框及備註欄視覺上即時顯示為大階 ( kecuali 密碼框)
+# ==========================================
+st.markdown("""
+<style>
+div[data-testid="InputInstructions"] > span,
+div[data-testid="InputInstructions"] {
+    display: none !important;
+}
+input[type="text"], textarea {
+    text-transform: uppercase !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # 🔒 私人密碼鎖驗證 (讀取雲端 APP_PASSWORD)
@@ -25,83 +32,92 @@ def check_password():
 
     if not st.session_state.authenticated:
         st.title("🔒 汽車換油保養雲端系統")
-        with st.form("login_form"):
-            pwd = st.text_input("請輸入私人密碼解鎖", type="password")
-            submitted = st.form_submit_button("🔓 登入", use_container_width=True)
-            if submitted:
-                if pwd == st.secrets.get("APP_PASSWORD", ""):
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("❌ 密碼錯誤，請重新輸入！")
+        pwd = st.text_input("請輸入私人密碼解鎖", type="password")
+        if st.button("🔓 登入", type="primary", use_container_width=True):
+            if pwd == st.secrets.get("APP_PASSWORD", ""):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("❌ 密碼錯誤，請重新輸入！")
         st.stop()
 
 check_password()
 
 # ==========================================
-# 🧠 初始化 Session State (保存 OCR 結果與鏡頭預設方向)
-# ==========================================
-if "search_ocr_plate" not in st.session_state:
-    st.session_state.search_ocr_plate = ""
-if "add_ocr_plate" not in st.session_state:
-    st.session_state.add_ocr_plate = ""
-if "cam_facing" not in st.session_state:
-    st.session_state.cam_facing = "environment"  # 預設使用後置鏡頭 ('environment' 為後置, 'user' 為前置)
-
-# ==========================================
 # ⚡ 前端 JavaScript：
-# 1. 強制文字框自動轉大階 (Caps Lock)
-# 2. 強制控制手機開啟「後置鏡頭」或「前置鏡頭」
+# 1. 強制所有 input[type="text"] 及 textarea 數值轉為大階並同步去 React 底層
+# 2. 支援直接揀下一個選項或撳 Enter 自動跳格，無須額外確認
 # ==========================================
-components.html(f"""
+components.html("""
 <script>
-// 1. 自動大階監聽
-function applyCapsLock() {{
-    const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-    inputs.forEach(input => {{
-        if (!input.dataset.capsApplied) {{
-            input.setAttribute('autocapitalize', 'characters');
-            input.addEventListener('input', function () {{
-                let start = this.selectionStart;
-                let end = this.selectionEnd;
-                this.value = this.value.toUpperCase();
-                this.setSelectionRange(start, end);
-            }});
-            input.dataset.capsApplied = "true";
-        }}
-    }});
-}}
-applyCapsLock();
-const observer = new MutationObserver(applyCapsLock);
-observer.observe(window.parent.document.body, {{ childList: true, subtree: true }});
+function setNativeValue(element, value) {
+    const prototype = Object.getPrototypeOf(element);
+    const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    if (valueSetter) {
+        valueSetter.call(element, value);
+    } else {
+        element.value = value;
+    }
+}
 
-// 2. 強制指定手機前後置鏡頭方向
-const parentNav = window.parent.navigator;
-if (parentNav.mediaDevices && parentNav.mediaDevices.getUserMedia) {{
-    if (!parentNav.mediaDevices._origGetUserMedia) {{
-        parentNav.mediaDevices._origGetUserMedia = parentNav.mediaDevices.getUserMedia.bind(parentNav.mediaDevices);
-    }}
-    window.parent._preferredFacingMode = "{st.session_state.cam_facing}";
-    parentNav.mediaDevices.getUserMedia = function(constraints) {{
-        if (constraints && constraints.video) {{
-            if (typeof constraints.video === 'boolean') {{
-                constraints.video = {{ facingMode: window.parent._preferredFacingMode }};
-            }} else if (typeof constraints.video === 'object' && !constraints.video.deviceId) {{
-                constraints.video.facingMode = window.parent._preferredFacingMode;
-            }}
-        }}
-        return parentNav.mediaDevices._origGetUserMedia(constraints);
-    }};
-}}
+function enhanceInputs() {
+    const doc = window.parent.document;
+    const textElements = doc.querySelectorAll('input[type="text"], textarea');
+    
+    textElements.forEach((el) => {
+        if (!el.dataset.enhanced) {
+            el.setAttribute('autocapitalize', 'characters');
+            if (el.tagName === 'INPUT') {
+                el.setAttribute('enterkeyhint', 'next');
+            }
+            
+            // 打字時即時將底層數值轉為大階
+            el.addEventListener('input', function () {
+                const start = this.selectionStart;
+                const end = this.selectionEnd;
+                const upperVal = this.value.toUpperCase();
+                if (this.value !== upperVal) {
+                    setNativeValue(this, upperVal);
+                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                    this.setSelectionRange(start, end);
+                }
+            });
+
+            // 當直接篤下一個選項 (blur) 時，確保大階數值已提交俾 Streamlit
+            el.addEventListener('blur', function () {
+                const upperVal = this.value.toUpperCase();
+                if (this.value !== upperVal) {
+                    setNativeValue(this, upperVal);
+                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+
+            // 喺單行輸入框撳 Enter 時，直接跳去下一個輸入格
+            if (el.tagName === 'INPUT') {
+                el.addEventListener('keydown', function (e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const allInputs = Array.from(doc.querySelectorAll('input:not([disabled]):not([type="hidden"]), textarea:not([disabled])'));
+                        const currentIndex = allInputs.indexOf(this);
+                        if (currentIndex > -1 && currentIndex + 1 < allInputs.length) {
+                            allInputs[currentIndex + 1].focus();
+                        } else {
+                            this.blur();
+                        }
+                    }
+                });
+            }
+
+            el.dataset.enhanced = "true";
+        }
+    });
+}
+enhanceInputs();
+const observer = new MutationObserver(enhanceInputs);
+observer.observe(window.parent.document.body, { childList: true, subtree: true });
 </script>
 """, height=0)
-
-# 定義通用 OCR 辨識函數
-def recognize_plate_from_bytes(image_bytes):
-    reader = load_ocr_reader()
-    results = reader.readtext(image_bytes)
-    raw_text = "".join([res[1] for res in results]).upper().replace(" ", "")
-    return "".join([c for c in raw_text if c.isalnum()])
 
 # ==========================================
 # ☁️ 連接 Supabase 雲端資料庫
@@ -122,6 +138,7 @@ with logout_col:
     st.write("")
     if st.button("🔒 鎖定", use_container_width=True):
         st.session_state.authenticated = False
+        st.session_state.edit_unlocked = False
         st.rerun()
 
 # 讀取雲端所有換油紀錄 (按日期由新到舊排列)
@@ -132,219 +149,298 @@ oil_records = res_oil.data or []
 existing_plates = sorted(list(set(r["license_plate"] for r in oil_records if r.get("license_plate"))))
 
 # ==========================================
-# 🔍 搜索及篩選紀錄 (加入快速 OCR 搜索車牌 ＋ 前後鏡頭切換)
+# 🔘 頂部三按鈕切換模式 (搜尋 vs 新增 vs 修改/刪除)
 # ==========================================
-st.subheader("🔍 搜索及篩選紀錄")
+if "active_view" not in st.session_state:
+    st.session_state.active_view = "search"
+if "edit_unlocked" not in st.session_state:
+    st.session_state.edit_unlocked = False
+if "add_form_key" not in st.session_state:
+    st.session_state.add_form_key = 0
 
-with st.expander("📷 用鏡頭拍照 / 上傳相片來快速搜索車牌"):
-    if not has_ocr:
-        st.warning("⚠️ 系統未安裝 `easyocr`，請確認 `requirements.txt` 已加入 `easyocr`。")
-    else:
-        s_cam_mode = st.radio("選擇相片來源", ["📸 開啟相機即時影", "📂 從手機相簿上傳"], horizontal=True, key="s_cam_mode")
-        
-        if s_cam_mode == "📸 開啟相機即時影":
-            s_lens = st.radio(
-                "🔄 選擇相機鏡頭方向",
-                ["📷 後置鏡頭 (影車牌)", "🤳 前置鏡頭"],
-                index=0 if st.session_state.cam_facing == "environment" else 1,
-                horizontal=True,
-                key="s_lens_radio"
-            )
-            new_facing = "environment" if "後置" in s_lens else "user"
-            if new_facing != st.session_state.cam_facing:
-                st.session_state.cam_facing = new_facing
-                st.rerun()
-            
-            # 用 key 綁定鏡頭方向，切換時自動刷新相機組件
-            search_img = st.camera_input("對準車牌拍照 (亦可按畫面右上角 🔄 切換)", key=f"s_cam_{st.session_state.cam_facing}")
-        else:
-            search_img = st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="s_upload")
-        
-        if search_img is not None:
-            if st.button("🔍 辨識並套用車牌搜索", use_container_width=True):
-                with st.spinner("AI 正在辨識車牌中..."):
-                    try:
-                        plate_res = recognize_plate_from_bytes(search_img.getvalue())
-                        if plate_res:
-                            st.session_state.search_ocr_plate = plate_res
-                            st.success(f"✅ 成功辨識出車牌：**{plate_res}**（已自動填入下方搜尋欄）")
-                        else:
-                            st.warning("⚠️ 辨識唔到清晰嘅車牌文字，請重拍或手動輸入。")
-                    except Exception as e:
-                        st.error(f"❌ 辨識發生錯誤: {e}")
-
-s_col1, s_col2, s_col3 = st.columns([1.2, 1, 1.2])
-with s_col1:
-    search_input = st.text_input(
-        "🚘 輸入車牌號碼 (自動大階)",
-        value=st.session_state.search_ocr_plate,
-        placeholder="如: AB1234..."
-    ).strip().upper().replace(" ", "")
-with s_col2:
-    quick_select = st.selectbox("或揀選車牌", ["全部車牌"] + existing_plates)
-with s_col3:
-    inv_search = st.text_input(
-        "🧾 輸入 Invoice 單號 (自動大階)",
-        placeholder="如: INV-2026..."
-    ).strip().upper()
-
-date_col1, date_col2 = st.columns([1, 2])
-with date_col1:
-    date_mode = st.selectbox("📅 日期篩選模式", ["不限日期", "指定單一日期", "日期範圍 (由...至...)"])
-with date_col2:
-    if date_mode == "指定單一日期":
-        target_date = st.date_input("選擇保養日期", date.today())
-    elif date_mode == "日期範圍 (由...至...)":
-        first_day_of_month = date.today().replace(day=1)
-        date_range = st.date_input("選擇開始及結束日期", value=(first_day_of_month, date.today()))
-    else:
-        st.text_input("目前顯示", value="所有日期嘅保養紀錄", disabled=True)
-
-# 篩選邏輯 (防 None 安全寫法)
-filtered_records = oil_records
-if search_input:
-    filtered_records = [r for r in filtered_records if search_input in (r.get("license_plate") or "").upper()]
-elif quick_select != "全部車牌":
-    filtered_records = [r for r in filtered_records if r.get("license_plate") == quick_select]
-
-if inv_search:
-    filtered_records = [r for r in filtered_records if inv_search in (r.get("invoice_no") or "").upper()]
-
-if date_mode == "指定單一日期":
-    target_date_str = str(target_date)
-    filtered_records = [r for r in filtered_records if r.get("service_date") == target_date_str]
-elif date_mode == "日期範圍 (由...至...)":
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_str, end_str = str(date_range[0]), str(date_range[1])
-        filtered_records = [r for r in filtered_records if start_str <= (r.get("service_date") or "") <= end_str]
-
-if (search_input or quick_select != "全部車牌") and filtered_records:
-    latest = filtered_records[0]
-    target_plate = latest.get("license_plate", "")
-    plate_count = len([r for r in filtered_records if r.get("license_plate") == target_plate])
-    st.info(
-        f"🚘 **車牌：`{target_plate}`** （符合篩選共 `{plate_count}` 次紀錄）\n\n"
-        f"📌 **最近一次保養**：{latest.get('service_date', '')} ｜ 單號：`{latest.get('invoice_no', '')}` ｜ 當時里數：`{int(latest.get('current_km') or 0):,} km`\n\n"
-        f"🔔 **下次換油目標**：**`{int(latest.get('next_km') or 0):,} km`**"
-    )
-
-# ==========================================
-# 1. 新增換油 / 保養紀錄 (支援 OCR 拍照辨識 ＋ 前後鏡頭切換)
-# ==========================================
-with st.expander("➕ 新增換油 / 保養紀錄 (支援鏡頭拍照辨識或鍵盤輸入)", expanded=not bool(oil_records)):
-    
-    st.markdown("### 📷 車牌智能辨識 (新增用)")
-    ocr_mode = st.radio("選擇輸入車牌方式", ["⌨️ 傳統鍵盤輸入", "📸 鏡頭拍照 OCR 辨識", "📂 上傳相片 OCR 辨識"], horizontal=True, key="add_ocr_radio")
-    
-    if ocr_mode in ["📸 鏡頭拍照 OCR 辨識", "📂 上傳相片 OCR 辨識"]:
-        if not has_ocr:
-            st.warning("⚠️ 系統尚未安裝 `easyocr` 套件。")
-        else:
-            if ocr_mode == "📸 鏡頭拍照 OCR 辨識":
-                a_lens = st.radio(
-                    "🔄 選擇相機鏡頭方向",
-                    ["📷 後置鏡頭 (影車牌)", "🤳 前置鏡頭"],
-                    index=0 if st.session_state.cam_facing == "environment" else 1,
-                    horizontal=True,
-                    key="add_lens_radio"
-                )
-                new_facing_add = "environment" if "後置" in a_lens else "user"
-                if new_facing_add != st.session_state.cam_facing:
-                    st.session_state.cam_facing = new_facing_add
-                    st.rerun()
-                
-                cam_file = st.camera_input("請對準車牌拍照 (亦可按畫面右上角 🔄 切換)", key=f"add_cam_{st.session_state.cam_facing}")
-            else:
-                cam_file = st.file_uploader("上傳車牌相片", type=["jpg", "jpeg", "png"], key="add_upload")
-                
-            if cam_file is not None:
-                if st.button("🔍 開始辨識車牌文字", key="btn_add_ocr", use_container_width=True):
-                    with st.spinner("AI 正在辨識車牌中..."):
-                        try:
-                            plate_res = recognize_plate_from_bytes(cam_file.getvalue())
-                            if plate_res:
-                                st.session_state.add_ocr_plate = plate_res
-                                st.success(f"✅ 成功辨識車牌：**{plate_res}**（已鎖定並自動填入下方表格！）")
-                            else:
-                                st.warning("⚠️ 辨識唔到車牌文字，請手動輸入。")
-                        except Exception as e:
-                            st.error(f"❌ 失敗: {e}")
-
-    with st.form("add_oil_form", clear_on_submit=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            default_plate = st.session_state.add_ocr_plate or search_input or (quick_select if quick_select != "全部車牌" else "")
-            plate_raw = st.text_input("車牌號碼 * (自動大階)", value=default_plate, placeholder="如: AB1234")
-            inv_raw = st.text_input("Invoice 單據編號 * (自動大階)", placeholder="如: INV-20261023-01")
-            s_date = st.date_input("保養日期 *", datetime.today())
-            c_km = st.number_input("目前里數 (km) *", min_value=0, step=500)
-        with col2:
-            interval = st.selectbox("下次換油間距 (km)", [5000, 7500, 8000, 10000], index=0)
-            oil_spec = st.text_input("機油牌子及黏度", placeholder="如: 5W-30 全合成 (4.3L)")
-            cost = st.number_input("費用 ($ HKD)", min_value=0, step=50)
-            o_filter = st.checkbox("已更換機油隔 (Oil Filter)", value=True)
-
-        notes = st.text_area("其他順便保養項目")
-
-        if st.form_submit_button("💾 儲存保養紀錄", use_container_width=True):
-            clean_plate = plate_raw.strip().upper().replace(" ", "")
-            clean_inv = inv_raw.strip().upper()
-            date_str = str(s_date)
-
-            if not clean_plate or not clean_inv:
-                st.error("⚠️ 請必須填寫「車牌號碼」同埋「Invoice 單據編號」！")
-            elif any((r.get("invoice_no") or "").upper() == clean_inv for r in oil_records):
-                st.error(f"❌ 儲存失敗：Invoice 單號 `{clean_inv}` 已經存在！")
-            elif any((r.get("license_plate") or "").upper() == clean_plate and r.get("service_date") == date_str for r in oil_records):
-                st.error(f"❌ 儲存失敗：車牌 `{clean_plate}` 喺 `{date_str}` 已經有一筆紀錄！")
-            else:
-                data = {
-                    "license_plate": clean_plate,
-                    "invoice_no": clean_inv,
-                    "service_date": date_str,
-                    "current_km": c_km,
-                    "next_km": c_km + interval,
-                    "oil_spec": oil_spec,
-                    "oil_filter": o_filter,
-                    "cost": cost,
-                    "notes": notes
-                }
-                supabase.table("oil_records").insert(data).execute()
-                st.session_state.add_ocr_plate = ""  # 儲存成功後清空暫存車牌
-                st.success(f"✅ 已成功儲存車牌 `{clean_plate}` 嘅紀錄！")
-                st.rerun()
-
-# ==========================================
-# 2. 顯示歷史保養紀錄 ＋ 總費用統計 ＋ 匯出 CSV 備份
-# ==========================================
-st.subheader("📋 保養紀錄列表及統計")
-if filtered_records:
-    total_cost = sum(int(r.get("cost") or 0) for r in filtered_records)
-    record_count = len(filtered_records)
-    avg_cost = int(total_cost / record_count) if record_count > 0 else 0
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("📋 符合紀錄單數", f"{record_count} 筆")
-    m2.metric("💰 篩選結果總費用", f"$ {total_cost:,} HKD")
-    m3.metric("📊 平均每單費用", f"$ {avg_cost:,} HKD")
-
-    df_oil = pd.DataFrame(filtered_records)
-    df_oil["oil_filter_display"] = df_oil["oil_filter"].apply(lambda x: "✅" if x else "❌")
-    
-    display_oil = df_oil[["id", "license_plate", "invoice_no", "service_date", "current_km", "next_km", "oil_spec", "oil_filter_display", "cost", "notes"]]
-    display_oil.columns = ["ID", "車牌", "Invoice 單號", "日期", "當時里數", "下次里數", "機油規格", "油隔", "費用($)", "備註"]
-    st.dataframe(display_oil, use_container_width=True, hide_index=True)
-
-    csv_data = display_oil.to_csv(index=False).encode("utf-8-sig")
-    plate_tag = search_input or (quick_select if quick_select != "全部車牌" else "ALL")
-    inv_tag = f"_{inv_search}" if inv_search else ""
-    file_tag = f"{plate_tag}{inv_tag}"
-    st.download_button(
-        label=f"📥 匯出目前篩選列表 ({file_tag}) 為 CSV 備份 (Excel 適用)",
-        data=csv_data,
-        file_name=f"oil_records_{file_tag}_{datetime.today().strftime('%Y%m%d')}.csv",
-        mime="text/csv",
+btn_col1, btn_col2, btn_col3 = st.columns(3)
+with btn_col1:
+    if st.button(
+        "🔍 搜索紀錄",
+        type="primary" if st.session_state.active_view == "search" else "secondary",
         use_container_width=True
-    )
-else:
-    st.write("暫時未有符合條件嘅換油紀錄。")
+    ):
+        st.session_state.active_view = "search"
+        st.session_state.edit_unlocked = False
+        st.rerun()
+
+with btn_col2:
+    if st.button(
+        "➕ 新增紀錄",
+        type="primary" if st.session_state.active_view == "add" else "secondary",
+        use_container_width=True
+    ):
+        st.session_state.active_view = "add"
+        st.session_state.edit_unlocked = False
+        st.rerun()
+
+with btn_col3:
+    if st.button(
+        "✏️ 修改 / 刪除",
+        type="primary" if st.session_state.active_view == "edit" else "secondary",
+        use_container_width=True
+    ):
+        st.session_state.active_view = "edit"
+        st.rerun()
+
+st.divider()
+
+# ==========================================
+# 畫面 A：🔍 搜索及篩選紀錄 ＋ 列表統計
+# ==========================================
+if st.session_state.active_view == "search":
+    st.subheader("🔍 搜索及篩選紀錄")
+
+    s_col1, s_col2, s_col3 = st.columns([1.2, 1, 1.2])
+    with s_col1:
+        search_input = st.text_input(
+            "🚘 輸入車牌號碼",
+            placeholder="如: AB1234..."
+        ).strip().upper().replace(" ", "")
+    with s_col2:
+        quick_select = st.selectbox("或揀選車牌", ["全部車牌"] + existing_plates)
+    with s_col3:
+        inv_search = st.text_input(
+            "🧾 輸入 Invoice 單號",
+            placeholder="如: INV-2026..."
+        ).strip().upper()
+
+    date_col1, date_col2 = st.columns([1, 2])
+    with date_col1:
+        date_mode = st.selectbox("📅 日期篩選模式", ["不限日期", "指定單一日期", "日期範圍 (由...至...)"])
+    with date_col2:
+        if date_mode == "指定單一日期":
+            target_date = st.date_input("選擇保養日期", date.today())
+        elif date_mode == "日期範圍 (由...至...)":
+            first_day_of_month = date.today().replace(day=1)
+            date_range = st.date_input("選擇開始及結束日期", value=(first_day_of_month, date.today()))
+        else:
+            st.text_input("目前顯示", value="所有日期嘅保養紀錄", disabled=True)
+
+    # 篩選邏輯
+    filtered_records = oil_records
+    if search_input:
+        filtered_records = [r for r in filtered_records if search_input in (r.get("license_plate") or "").upper()]
+    elif quick_select != "全部車牌":
+        filtered_records = [r for r in filtered_records if r.get("license_plate") == quick_select]
+
+    if inv_search:
+        filtered_records = [r for r in filtered_records if inv_search in (r.get("invoice_no") or "").upper()]
+
+    if date_mode == "指定單一日期":
+        target_date_str = str(target_date)
+        filtered_records = [r for r in filtered_records if r.get("service_date") == target_date_str]
+    elif date_mode == "日期範圍 (由...至...)":
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_str, end_str = str(date_range[0]), str(date_range[1])
+            filtered_records = [r for r in filtered_records if start_str <= (r.get("service_date") or "") <= end_str]
+
+    if (search_input or quick_select != "全部車牌") and filtered_records:
+        latest = filtered_records[0]
+        target_plate = latest.get("license_plate", "")
+        plate_count = len([r for r in filtered_records if r.get("license_plate") == target_plate])
+        st.info(
+            f"🚘 **車牌：`{target_plate}`** （符合篩選共 `{plate_count}` 次紀錄）\n\n"
+            f"📌 **最近一次保養**：{latest.get('service_date', '')} ｜ 單號：`{latest.get('invoice_no', '')}` ｜ 當時里數：`{int(latest.get('current_km') or 0):,} km`\n\n"
+            f"🔔 **下次換油目標**：**`{int(latest.get('next_km') or 0):,} km`**"
+        )
+
+    # 顯示歷史保養紀錄 ＋ 總費用統計 ＋ 匯出 CSV 備份
+    st.subheader("📋 保養紀錄列表及統計")
+    if filtered_records:
+        total_cost = sum(int(r.get("cost") or 0) for r in filtered_records)
+        record_count = len(filtered_records)
+        avg_cost = int(total_cost / record_count) if record_count > 0 else 0
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("📋 符合紀錄單數", f"{record_count} 筆")
+        m2.metric("💰 篩選結果總費用", f"$ {total_cost:,} HKD")
+        m3.metric("📊 平均每單費用", f"$ {avg_cost:,} HKD")
+
+        df_oil = pd.DataFrame(filtered_records)
+        df_oil["oil_filter_display"] = df_oil["oil_filter"].apply(lambda x: "✅" if x else "❌")
+        
+        display_oil = df_oil[["id", "license_plate", "invoice_no", "service_date", "current_km", "next_km", "oil_spec", "oil_filter_display", "cost", "notes"]]
+        display_oil.columns = ["ID", "車牌", "Invoice 單號", "日期", "當時里數", "下次里數", "機油規格", "油隔", "費用($)", "備註"]
+        st.dataframe(display_oil, use_container_width=True, hide_index=True)
+
+        csv_data = display_oil.to_csv(index=False).encode("utf-8-sig")
+        plate_tag = search_input or (quick_select if quick_select != "全部車牌" else "ALL")
+        inv_tag = f"_{inv_search}" if inv_search else ""
+        file_tag = f"{plate_tag}{inv_tag}"
+        st.download_button(
+            label=f"📥 匯出目前篩選列表 ({file_tag}) 為 CSV 備份 (Excel 適用)",
+            data=csv_data,
+            file_name=f"oil_records_{file_tag}_{datetime.today().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    else:
+        st.write("暫時未有符合條件嘅換油紀錄。")
+
+# ==========================================
+# 畫面 B：➕ 新增換油 / 保養紀錄 (全欄位強制大階 ＋ 直接跳格)
+# ==========================================
+elif st.session_state.active_view == "add":
+    st.subheader("➕ 新增換油 / 保養紀錄")
+    fk = st.session_state.add_form_key
+
+    col1, col2 = st.columns(2)
+    with col1:
+        plate_raw = st.text_input("車牌號碼 *", placeholder="如: AB1234", key=f"add_plate_{fk}")
+        inv_raw = st.text_input("Invoice 單據編號 *", placeholder="如: INV-20261023-01", key=f"add_inv_{fk}")
+        s_date = st.date_input("保養日期 *", datetime.today(), key=f"add_date_{fk}")
+        c_km = st.number_input("目前里數 (km) *", min_value=0, step=500, key=f"add_ckm_{fk}")
+    with col2:
+        interval = st.selectbox("下次換油間距 (km)", [5000, 7500, 8000, 10000], index=0, key=f"add_int_{fk}")
+        oil_spec = st.text_input("機油牌子及黏度", placeholder="如: 5W-30 全合成 (4.3L)", key=f"add_spec_{fk}")
+        cost = st.number_input("費用 ($ HKD)", min_value=0, step=50, key=f"add_cost_{fk}")
+        o_filter = st.checkbox("已更換機油隔 (Oil Filter)", value=True, key=f"add_filter_{fk}")
+
+    notes = st.text_area("其他順便保養項目 (如：洗蝴蝶掩、換火咀、波箱油、冷氣隔)", key=f"add_notes_{fk}")
+
+    if st.button("💾 儲存保養紀錄", type="primary", use_container_width=True):
+        clean_plate = plate_raw.strip().upper().replace(" ", "")
+        clean_inv = inv_raw.strip().upper()
+        clean_spec = oil_spec.strip().upper()
+        clean_notes = notes.strip().upper()
+        date_str = str(s_date)
+
+        if not clean_plate or not clean_inv:
+            st.error("⚠️ 請必須填寫「車牌號碼」同埋「Invoice 單據編號」！")
+        elif any((r.get("invoice_no") or "").upper() == clean_inv for r in oil_records):
+            st.error(f"❌ 儲存失敗：Invoice 單號 `{clean_inv}` 已經存在，單號唔可以重複！")
+        elif any((r.get("license_plate") or "").upper() == clean_plate and r.get("service_date") == date_str for r in oil_records):
+            st.error(f"❌ 儲存失敗：車牌 `{clean_plate}` 喺 `{date_str}` 已經有一筆紀錄，同車同日唔可以重複！")
+        else:
+            data = {
+                "license_plate": clean_plate,
+                "invoice_no": clean_inv,
+                "service_date": date_str,
+                "current_km": c_km,
+                "next_km": c_km + interval,
+                "oil_spec": clean_spec,
+                "oil_filter": o_filter,
+                "cost": cost,
+                "notes": clean_notes
+            }
+            supabase.table("oil_records").insert(data).execute()
+            st.session_state.add_form_key += 1  # 自動清空所有欄位方便入下一張單
+            st.success(f"✅ 已成功儲存車牌 `{clean_plate}` (單號: `{clean_inv}`) 嘅保養紀錄！")
+            st.rerun()
+
+# ==========================================
+# 畫面 C：✏️ 修改 / 🗑️ 刪除過往保養紀錄 (雙重密碼保護：95251034)
+# ==========================================
+elif st.session_state.active_view == "edit":
+    st.subheader("✏️ 修改或刪除過往保養紀錄")
+
+    EDIT_PASSWORD = st.secrets.get("EDIT_PASSWORD", "95251034")
+
+    if not st.session_state.edit_unlocked:
+        st.info("🔐 此區域受管理員密碼保護，請輸入修改專用密碼以繼續。")
+        edit_pwd = st.text_input("請輸入修改 / 刪除專用密碼", type="password")
+        if st.button("🔓 解鎖修改權限", type="primary", use_container_width=True):
+            if edit_pwd == EDIT_PASSWORD:
+                st.session_state.edit_unlocked = True
+                st.rerun()
+            else:
+                st.error("❌ 專用密碼錯誤，無法進入修改模式！")
+    else:
+        lock_col1, lock_col2 = st.columns([3, 1])
+        with lock_col1:
+            st.success("🔓 已解鎖修改及刪除權限")
+        with lock_col2:
+            if st.button("🔒 重新上鎖", use_container_width=True):
+                st.session_state.edit_unlocked = False
+                st.rerun()
+
+        if not oil_records:
+            st.write("暫時未有任何保養紀錄可供修改。")
+        else:
+            f_col1, f_col2 = st.columns(2)
+            with f_col1:
+                edit_filter_plate = st.text_input("🚘 篩選車牌", placeholder="輸入車牌快速尋找...").strip().upper().replace(" ", "")
+            with f_col2:
+                edit_filter_inv = st.text_input("🧾 篩選單號", placeholder="輸入單號快速尋找...").strip().upper()
+
+            edit_candidates = oil_records
+            if edit_filter_plate:
+                edit_candidates = [r for r in edit_candidates if edit_filter_plate in (r.get("license_plate") or "").upper()]
+            if edit_filter_inv:
+                edit_candidates = [r for r in edit_candidates if edit_filter_inv in (r.get("invoice_no") or "").upper()]
+
+            if not edit_candidates:
+                st.warning("⚠️ 搵唔到符合篩選條件嘅紀錄。")
+            else:
+                record_options = {
+                    f"ID:{r['id']} ｜ 🚘 {r.get('license_plate', '')} ｜ 📅 {r.get('service_date', '')} ｜ 🧾 {r.get('invoice_no', '')} ($ {r.get('cost', 0)})": r
+                    for r in edit_candidates
+                }
+                selected_label = st.selectbox("📌 請揀選要修改或刪除嘅保養紀錄", list(record_options.keys()))
+                selected_rec = record_options[selected_label]
+                rec_id = selected_rec["id"]
+
+                try:
+                    orig_date = datetime.strptime(selected_rec.get("service_date", ""), "%Y-%m-%d").date()
+                except Exception:
+                    orig_date = date.today()
+
+                st.markdown(f"**正在編輯紀錄 ID：`{rec_id}`**")
+                e_col1, e_col2 = st.columns(2)
+                with e_col1:
+                    new_plate = st.text_input("車牌號碼 *", value=(selected_rec.get("license_plate") or "").upper(), key=f"ep_{rec_id}")
+                    new_inv = st.text_input("Invoice 單據編號 *", value=(selected_rec.get("invoice_no") or "").upper(), key=f"ei_{rec_id}")
+                    new_date = st.date_input("保養日期 *", value=orig_date, key=f"ed_{rec_id}")
+                    new_ckm = st.number_input("當時里數 (km) *", min_value=0, step=500, value=int(selected_rec.get("current_km") or 0), key=f"eck_{rec_id}")
+                with e_col2:
+                    new_nkm = st.number_input("下次換油目標里數 (km) *", min_value=0, step=500, value=int(selected_rec.get("next_km") or 0), key=f"enk_{rec_id}")
+                    new_spec = st.text_input("機油牌子及黏度", value=(selected_rec.get("oil_spec") or "").upper(), key=f"esp_{rec_id}")
+                    new_cost = st.number_input("費用 ($ HKD)", min_value=0, step=50, value=int(selected_rec.get("cost") or 0), key=f"eco_{rec_id}")
+                    new_filter = st.checkbox("已更換機油隔 (Oil Filter)", value=bool(selected_rec.get("oil_filter", True)), key=f"efi_{rec_id}")
+
+                new_notes = st.text_area("其他順便保養項目", value=(selected_rec.get("notes") or "").upper(), key=f"eno_{rec_id}")
+
+                if st.button("💾 儲存修改內容", type="primary", use_container_width=True):
+                    c_plate = new_plate.strip().upper().replace(" ", "")
+                    c_inv = new_inv.strip().upper()
+                    c_spec = new_spec.strip().upper()
+                    c_notes = new_notes.strip().upper()
+                    c_date_str = str(new_date)
+
+                    if not c_plate or not c_inv:
+                        st.error("⚠️ 車牌號碼同埋 Invoice 單據編號唔可以留空！")
+                    elif any(r["id"] != rec_id and (r.get("invoice_no") or "").upper() == c_inv for r in oil_records):
+                        st.error(f"❌ 修改失敗：Invoice 單號 `{c_inv}` 已經被其他紀錄使用！")
+                    elif any(r["id"] != rec_id and (r.get("license_plate") or "").upper() == c_plate and r.get("service_date") == c_date_str for r in oil_records):
+                        st.error(f"❌ 修改失敗：車牌 `{c_plate}` 喺 `{c_date_str}` 已經有另一筆紀錄！")
+                    else:
+                        update_data = {
+                            "license_plate": c_plate,
+                            "invoice_no": c_inv,
+                            "service_date": c_date_str,
+                            "current_km": new_ckm,
+                            "next_km": new_nkm,
+                            "oil_spec": c_spec,
+                            "oil_filter": new_filter,
+                            "cost": new_cost,
+                            "notes": c_notes
+                        }
+                        supabase.table("oil_records").update(update_data).eq("id", rec_id).execute()
+                        st.success(f"✅ 已成功更新車牌 `{c_plate}` (單號: `{c_inv}`) 嘅紀錄！")
+                        st.rerun()
+
+                # 🗑️ 刪除紀錄區塊 (附帶二次確認防誤刪)
+                st.write("")
+                with st.expander("🗑️ 刪除此筆保養紀錄 (危險操作)"):
+                    st.warning(f"確定要永久刪除 **車牌 `{selected_rec.get('license_plate')}` (單號: `{selected_rec.get('invoice_no')}`)** 嘅紀錄嗎？刪除後無法復原！")
+                    confirm_del = st.checkbox("✅ 我確認要永久刪除呢筆紀錄", key=f"del_confirm_{rec_id}")
+                    if st.button("🗑️ 立即永久刪除", type="primary", disabled=not confirm_del, use_container_width=True):
+                        supabase.table("oil_records").delete().eq("id", rec_id).execute()
+                        st.success("✅ 紀錄已成功刪除！")
+                        st.rerun()
