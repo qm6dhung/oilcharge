@@ -118,60 +118,101 @@ observer.observe(window.parent.document.body, { childList: true, subtree: true }
 """, height=0)
 
 # ==========================================
-# 🛠️ 輔助函數：打包與拆解五項保養明細及價錢 (無須改動 Supabase 資料表結構)
+# 🛠️ 保養項目清單定義與打包/拆解輔助函數 (無須改動 Supabase 資料表結構)
 # ==========================================
-def pack_items_to_notes(oil_chk, oil_p, of_chk, of_p, af_chk, af_p, cf_chk, cf_p, lb_chk, lb_p, user_notes):
+SERVICE_ITEMS = [
+    ("oil", "偈油", "🛢️ 偈油 (Engine Oil)", "如: 5W-30 (4L)", True, 50),
+    ("oil_lb", "換偈油人工", "👨‍🔧 換偈油人工", "如: 標準換油工時", True, 50),
+    ("atf", "自動波箱油", "⚙️ 自動波箱油 (ATF/CVTF)", "如: TOYOTA WS (4L)", False, 50),
+    ("mtf", "波箱油", "🕹️ 波箱油 (MTF)", "如: 75W-90 (2L)", False, 50),
+    ("diff", "尾牙油", "🔩 尾牙油 (Diff Oil)", "如: 80W-90", False, 50),
+    ("flush", "清洗偈油", "🧪 清洗偈油 (Engine Flush)", "如: LIQUI MOLY エンジン洗浄", False, 20),
+    ("wash", "洗車/唧油", "🚿 洗車 / 唧油", "如: 洗車 / 底盤唧雪油", False, 20),
+    ("of", "油隔", "🔧 油隔 (Oil Filter)", "如: 90915-YZZE1", True, 20),
+    ("ff", "油渣/電油格", "⛽ 油渣格 / 電油格 (Fuel Filter)", "如: 23390-0L070", False, 20),
+    ("af", "風隔", "🌬️ 風隔 (Air Filter)", "如: 17801-28030", False, 20),
+    ("cf", "冷氣隔", "❄️ 冷氣隔 (Cabin Filter)", "如: 87139-0N010", False, 20),
+    ("lb", "其他人工", "🛠️ 其他人工 (Labor)", "如: 檢查工時", False, 50),
+]
+
+def _clean_model_str(m_str):
+    return re.sub(r"[()（）｜【】]", "-", (m_str or "").strip().upper())
+
+def pack_items_dict_to_notes(items_state, user_notes):
     tags = []
-    if oil_chk:
-        tags.append(f"換機油:${int(oil_p)}")
-    if of_chk:
-        tags.append(f"油隔:${int(of_p)}")
-    if af_chk:
-        tags.append(f"風隔:${int(af_p)}")
-    if cf_chk:
-        tags.append(f"冷氣隔:${int(cf_p)}")
-    if lb_chk:
-        tags.append(f"人工:${int(lb_p)}")
+    for key, tag_label, _, _, _, _ in SERVICE_ITEMS:
+        chk = items_state.get(f"{key}_chk", False)
+        mod = items_state.get(f"{key}_m", "")
+        prc = items_state.get(f"{key}_p", 0)
+        if chk:
+            cm = _clean_model_str(mod)
+            if cm:
+                tags.append(f"{tag_label}({cm}):${int(prc)}")
+            else:
+                tags.append(f"{tag_label}:${int(prc)}")
     prefix = f"【{'｜'.join(tags)}】" if tags else ""
-    clean_u = user_notes.strip().upper()
+    clean_u = (user_notes or "").strip().upper()
     return f"{prefix} {clean_u}".strip() if clean_u else prefix
 
 def parse_items_from_record(rec):
     raw_notes = rec.get("notes") or ""
     total_cost = int(rec.get("cost") or 0)
     of_bool = bool(rec.get("oil_filter", True))
+    raw_oil_spec = (rec.get("oil_spec") or "").upper()
     
-    # 預設值 (相容舊紀錄)
-    res = {
-        "oil_chk": True, "oil_p": total_cost,
-        "of_chk": of_bool, "of_p": 0,
-        "af_chk": False, "af_p": 0,
-        "cf_chk": False, "cf_p": 0,
-        "lb_chk": False, "lb_p": 0,
-        "clean_notes": raw_notes
-    }
-    
+    # 初始化預設狀態 (相容最早期舊紀錄)
+    res = {"clean_notes": raw_notes}
+    for key, _, _, _, _, _ in SERVICE_ITEMS:
+        res[f"{key}_chk"] = False
+        res[f"{key}_m"] = ""
+        res[f"{key}_p"] = 0
+        
+    res["oil_chk"] = True
+    res["oil_m"] = raw_oil_spec
+    res["oil_p"] = total_cost
+    res["of_chk"] = of_bool
+
     match = re.match(r"^【(.*?)】\s*(.*)$", raw_notes, re.DOTALL)
     if match:
         tag_str, rem_notes = match.group(1), match.group(2)
         res["clean_notes"] = rem_notes
-        res["oil_chk"] = "換機油:" in tag_str
-        res["of_chk"] = "油隔:" in tag_str
-        res["af_chk"] = "風隔:" in tag_str
-        res["cf_chk"] = "冷氣隔:" in tag_str
-        res["lb_chk"] = "人工:" in tag_str
-        
-        m_oil = re.search(r"換機油:\$(\d+)", tag_str)
-        m_of = re.search(r"油隔:\$(\d+)", tag_str)
-        m_af = re.search(r"風隔:\$(\d+)", tag_str)
-        m_cf = re.search(r"冷氣隔:\$(\d+)", tag_str)
-        m_lb = re.search(r"人工:\$(\d+)", tag_str)
-        
-        res["oil_p"] = int(m_oil.group(1)) if m_oil else 0
-        res["of_p"] = int(m_of.group(1)) if m_of else 0
-        res["af_p"] = int(m_af.group(1)) if m_af else 0
-        res["cf_p"] = int(m_cf.group(1)) if m_cf else 0
-        res["lb_p"] = int(m_lb.group(1)) if m_lb else 0
+        # 先清空預設，按標籤實際內容還原
+        for key, _, _, _, _, _ in SERVICE_ITEMS:
+            res[f"{key}_chk"] = False
+            res[f"{key}_m"] = ""
+            res[f"{key}_p"] = 0
+
+        # 支援新版及舊版標籤名稱對應
+        label_aliases = {
+            "oil": ["偈油", "換機油"],
+            "oil_lb": ["換偈油人工"],
+            "atf": ["自動波箱油"],
+            "mtf": ["波箱油"],
+            "diff": ["尾牙油"],
+            "flush": ["清洗偈油"],
+            "wash": ["洗車/唧油", "洗車/潔油", "洗車", "唧油", "潔油"],
+            "of": ["油隔", "機油隔"],
+            "ff": ["油渣/電油格", "油渣格", "電油格", "汽油格"],
+            "af": ["風隔", "風格"],
+            "cf": ["冷氣隔", "冷氣格"],
+            "lb": ["其他人工", "人工"],
+        }
+
+        segments = [s.strip() for s in tag_str.split("｜") if s.strip()]
+        for seg in segments:
+            m = re.match(r"^([^(:]+)(?:\((.*?)\))?:\$(\d+)$", seg)
+            if m:
+                seg_label = m.group(1).strip()
+                seg_mod = (m.group(2) or "").strip().upper()
+                seg_prc = int(m.group(3))
+                for key, aliases in label_aliases.items():
+                    if seg_label in aliases:
+                        res[f"{key}_chk"] = True
+                        if key == "oil" and not seg_mod:
+                            seg_mod = raw_oil_spec
+                        res[f"{key}_m"] = seg_mod
+                        res[f"{key}_p"] = seg_prc
+                        break
     return res
 
 # ==========================================
@@ -302,7 +343,8 @@ if st.session_state.active_view == "search":
         st.info(
             f"🚘 **車牌：`{target_plate}`** （符合篩選共 `{plate_count}` 次紀錄）\n\n"
             f"📌 **最近一次保養**：{latest.get('service_date', '')} ｜ 單號：`{latest.get('invoice_no', '')}` ｜ 當時里數：`{int(latest.get('current_km') or 0):,} km`\n\n"
-            f"🔔 **下次換油目標**：**`{int(latest.get('next_km') or 0):,} km`**"
+            f"🔔 **下次換油目標**：**`{int(latest.get('next_km') or 0):,} km`**\n\n"
+            f"🛠️ **上次保養明細**：{latest.get('notes', '無')}"
         )
 
     # 顯示歷史保養紀錄 ＋ 總費用統計 ＋ 匯出 CSV 備份
@@ -321,7 +363,7 @@ if st.session_state.active_view == "search":
         df_oil["oil_filter_display"] = df_oil["oil_filter"].apply(lambda x: "✅" if x else "❌")
         
         display_oil = df_oil[["id", "license_plate", "invoice_no", "service_date", "current_km", "next_km", "oil_spec", "oil_filter_display", "cost", "notes"]]
-        display_oil.columns = ["ID", "車牌", "Invoice 單號", "日期", "當時里數", "下次里數", "機油規格", "油隔", "總費用($)", "保養明細及備註"]
+        display_oil.columns = ["ID", "車牌", "Invoice 單號", "日期", "當時里數", "下次里數", "偈油型號", "油隔", "總費用($)", "保養項目型號及收費明細"]
         st.dataframe(display_oil, use_container_width=True, hide_index=True)
 
         csv_data = display_oil.to_csv(index=False).encode("utf-8-sig")
@@ -339,7 +381,7 @@ if st.session_state.active_view == "search":
         st.write("暫時未有符合條件嘅換油紀錄。")
 
 # ==========================================
-# 畫面 B：➕ 新增換油 / 保養紀錄 (含五項獨立勾選及價錢輸入)
+# 畫面 B：➕ 新增換油 / 保養紀錄 (含 12 項勾選 ＋ 型號 ＋ 價錢)
 # ==========================================
 elif st.session_state.active_view == "add":
     st.subheader("➕ 新增換油 / 保養紀錄")
@@ -353,66 +395,36 @@ elif st.session_state.active_view == "add":
     with col2:
         c_km = st.number_input("目前里數 (km) *", min_value=0, step=500, key=f"add_ckm_{fk}")
         interval = st.selectbox("下次換油間距 (km)", [5000, 7500, 8000, 10000], index=0, key=f"add_int_{fk}")
-        oil_spec = st.text_input("機油牌子及黏度", placeholder="如: 5W-30 全合成 (4.3L)", key=f"add_spec_{fk}")
 
-    st.markdown("#### 🛠️ 保養項目及收費明細")
-    
-    # 第 1 項：是否換機油 + 價錢
-    ic1, ip1 = st.columns([1.3, 2])
-    with ic1:
-        st.write("")
-        chk_oil = st.checkbox("🛢️ 更換機油 (Engine Oil)", value=True, key=f"chk_oil_{fk}")
-    with ip1:
-        price_oil = st.number_input("換機油價錢 ($ HKD)", min_value=0, step=50, disabled=not chk_oil, key=f"p_oil_{fk}")
+    st.markdown("#### 🛠️ 保養項目、型號及收費明細")
 
-    # 第 2 項：是否換油隔 + 價錢
-    ic2, ip2 = st.columns([1.3, 2])
-    with ic2:
-        st.write("")
-        chk_of = st.checkbox("🔧 更換油隔 (Oil Filter)", value=True, key=f"chk_of_{fk}")
-    with ip2:
-        price_of = st.number_input("油隔價錢 ($ HKD)", min_value=0, step=20, disabled=not chk_of, key=f"p_of_{fk}")
+    add_items_state = {}
+    calc_total = 0
 
-    # 第 3 項：是否換風隔 + 價錢
-    ic3, ip3 = st.columns([1.3, 2])
-    with ic3:
-        st.write("")
-        chk_af = st.checkbox("🌬️ 更換風隔 (Air Filter)", value=False, key=f"chk_af_{fk}")
-    with ip3:
-        price_af = st.number_input("風隔價錢 ($ HKD)", min_value=0, step=20, disabled=not chk_af, key=f"p_af_{fk}")
+    for key, tag_label, ui_label, ph, def_chk, step_val in SERVICE_ITEMS:
+        ic, im, ip = st.columns([1.3, 1.5, 1.2])
+        with ic:
+            st.write("")
+            chk = st.checkbox(ui_label, value=def_chk, key=f"add_chk_{key}_{fk}")
+        with im:
+            mod = st.text_input(f"{tag_label}型號 / 規格", placeholder=ph, disabled=not chk, key=f"add_m_{key}_{fk}")
+        with ip:
+            prc = st.number_input(f"{tag_label}價錢 ($)", min_value=0, step=step_val, disabled=not chk, key=f"add_p_{key}_{fk}")
+        
+        add_items_state[f"{key}_chk"] = chk
+        add_items_state[f"{key}_m"] = mod
+        add_items_state[f"{key}_p"] = prc if chk else 0
+        if chk:
+            calc_total += prc
 
-    # 第 4 項：是否換冷氣隔 + 價錢
-    ic4, ip4 = st.columns([1.3, 2])
-    with ic4:
-        st.write("")
-        chk_cf = st.checkbox("❄️ 更換冷氣隔 (Cabin Filter)", value=False, key=f"chk_cf_{fk}")
-    with ip4:
-        price_cf = st.number_input("冷氣隔價錢 ($ HKD)", min_value=0, step=20, disabled=not chk_cf, key=f"p_cf_{fk}")
-
-    # 第 5 項：是否收人工 + 價錢
-    ic5, ip5 = st.columns([1.3, 2])
-    with ic5:
-        st.write("")
-        chk_lb = st.checkbox("👨‍🔧 人工 (Labor)", value=False, key=f"chk_lb_{fk}")
-    with ip5:
-        price_lb = st.number_input("人工價錢 ($ HKD)", min_value=0, step=50, disabled=not chk_lb, key=f"p_lb_{fk}")
-
-    # 自動計算總費用
-    calc_total = (
-        (price_oil if chk_oil else 0) +
-        (price_of if chk_of else 0) +
-        (price_af if chk_af else 0) +
-        (price_cf if chk_cf else 0) +
-        (price_lb if chk_lb else 0)
-    )
     st.info(f"💰 **本單自動計算總費用：`$ {calc_total:,} HKD`**")
 
-    notes = st.text_area("其他順便保養項目或備註 (如：洗蝴蝶掩、換火咀、波箱油)", key=f"add_notes_{fk}")
+    notes = st.text_area("其他順便保養項目或備註 (如：洗蝴蝶掩、換火咀、迫力皮)", key=f"add_notes_{fk}")
 
     if st.button("💾 儲存保養紀錄", type="primary", use_container_width=True):
         clean_plate = plate_raw.strip().upper().replace(" ", "")
         clean_inv = inv_raw.strip().upper()
-        clean_spec = oil_spec.strip().upper()
+        clean_spec = add_items_state["oil_m"].strip().upper() if add_items_state["oil_chk"] else ""
         date_str = str(s_date)
 
         if not clean_plate or not clean_inv:
@@ -422,14 +434,7 @@ elif st.session_state.active_view == "add":
         elif any((r.get("license_plate") or "").upper() == clean_plate and r.get("service_date") == date_str for r in oil_records):
             st.error(f"❌ 儲存失敗：車牌 `{clean_plate}` 喺 `{date_str}` 已經有一筆紀錄，同車同日唔可以重複！")
         else:
-            packed_notes = pack_items_to_notes(
-                chk_oil, price_oil if chk_oil else 0,
-                chk_of, price_of if chk_of else 0,
-                chk_af, price_af if chk_af else 0,
-                chk_cf, price_cf if chk_cf else 0,
-                chk_lb, price_lb if chk_lb else 0,
-                notes
-            )
+            packed_notes = pack_items_dict_to_notes(add_items_state, notes)
             data = {
                 "license_plate": clean_plate,
                 "invoice_no": clean_inv,
@@ -437,7 +442,7 @@ elif st.session_state.active_view == "add":
                 "current_km": c_km,
                 "next_km": c_km + interval,
                 "oil_spec": clean_spec,
-                "oil_filter": chk_of,
+                "oil_filter": add_items_state["of_chk"],
                 "cost": calc_total,
                 "notes": packed_notes
             }
@@ -514,51 +519,27 @@ elif st.session_state.active_view == "edit":
                 with e_col2:
                     new_ckm = st.number_input("當時里數 (km) *", min_value=0, step=500, value=int(selected_rec.get("current_km") or 0), key=f"eck_{rec_id}")
                     new_nkm = st.number_input("下次換油目標里數 (km) *", min_value=0, step=500, value=int(selected_rec.get("next_km") or 0), key=f"enk_{rec_id}")
-                    new_spec = st.text_input("機油牌子及黏度", value=(selected_rec.get("oil_spec") or "").upper(), key=f"esp_{rec_id}")
 
-                st.markdown("#### 🛠️ 修改保養項目及收費明細")
-                ec1, ep1 = st.columns([1.3, 2])
-                with ec1:
-                    st.write("")
-                    e_chk_oil = st.checkbox("🛢️ 更換機油 (Engine Oil)", value=parsed["oil_chk"], key=f"echk_oil_{rec_id}")
-                with ep1:
-                    e_p_oil = st.number_input("換機油價錢 ($ HKD)", min_value=0, step=50, value=parsed["oil_p"], disabled=not e_chk_oil, key=f"ep_oil_{rec_id}")
+                st.markdown("#### 🛠️ 修改保養項目、型號及收費明細")
+                edit_items_state = {}
+                e_calc_total = 0
 
-                ec2, ep2 = st.columns([1.3, 2])
-                with ec2:
-                    st.write("")
-                    e_chk_of = st.checkbox("🔧 更換油隔 (Oil Filter)", value=parsed["of_chk"], key=f"echk_of_{rec_id}")
-                with ep2:
-                    e_p_of = st.number_input("油隔價錢 ($ HKD)", min_value=0, step=20, value=parsed["of_p"], disabled=not e_chk_of, key=f"ep_of_{rec_id}")
+                for key, tag_label, ui_label, ph, _, step_val in SERVICE_ITEMS:
+                    ec, em, ep = st.columns([1.3, 1.5, 1.2])
+                    with ec:
+                        st.write("")
+                        e_chk = st.checkbox(ui_label, value=parsed[f"{key}_chk"], key=f"echk_{key}_{rec_id}")
+                    with em:
+                        e_mod = st.text_input(f"{tag_label}型號 / 規格", value=parsed[f"{key}_m"], placeholder=ph, disabled=not e_chk, key=f"em_{key}_{rec_id}")
+                    with ep:
+                        e_prc = st.number_input(f"{tag_label}價錢 ($)", min_value=0, step=step_val, value=int(parsed[f"{key}_p"]), disabled=not e_chk, key=f"ep_{key}_{rec_id}")
+                    
+                    edit_items_state[f"{key}_chk"] = e_chk
+                    edit_items_state[f"{key}_m"] = e_mod
+                    edit_items_state[f"{key}_p"] = e_prc if e_chk else 0
+                    if e_chk:
+                        e_calc_total += e_prc
 
-                ec3, ep3 = st.columns([1.3, 2])
-                with ec3:
-                    st.write("")
-                    e_chk_af = st.checkbox("🌬️ 更換風隔 (Air Filter)", value=parsed["af_chk"], key=f"echk_af_{rec_id}")
-                with ep3:
-                    e_p_af = st.number_input("風隔價錢 ($ HKD)", min_value=0, step=20, value=parsed["af_p"], disabled=not e_chk_af, key=f"ep_af_{rec_id}")
-
-                ec4, ep4 = st.columns([1.3, 2])
-                with ec4:
-                    st.write("")
-                    e_chk_cf = st.checkbox("❄️ 更換冷氣隔 (Cabin Filter)", value=parsed["cf_chk"], key=f"echk_cf_{rec_id}")
-                with ep4:
-                    e_p_cf = st.number_input("冷氣隔價錢 ($ HKD)", min_value=0, step=20, value=parsed["cf_p"], disabled=not e_chk_cf, key=f"ep_cf_{rec_id}")
-
-                ec5, ep5 = st.columns([1.3, 2])
-                with ec5:
-                    st.write("")
-                    e_chk_lb = st.checkbox("👨‍🔧 人工 (Labor)", value=parsed["lb_chk"], key=f"echk_lb_{rec_id}")
-                with ep5:
-                    e_p_lb = st.number_input("人工價錢 ($ HKD)", min_value=0, step=50, value=parsed["lb_p"], disabled=not e_chk_lb, key=f"ep_lb_{rec_id}")
-
-                e_calc_total = (
-                    (e_p_oil if e_chk_oil else 0) +
-                    (e_p_of if e_chk_of else 0) +
-                    (e_p_af if e_chk_af else 0) +
-                    (e_p_cf if e_chk_cf else 0) +
-                    (e_p_lb if e_chk_lb else 0)
-                )
                 st.info(f"💰 **更新後自動計算總費用：`$ {e_calc_total:,} HKD`**")
 
                 new_notes = st.text_area("其他順便保養項目或備註", value=parsed["clean_notes"].upper(), key=f"eno_{rec_id}")
@@ -566,7 +547,7 @@ elif st.session_state.active_view == "edit":
                 if st.button("💾 儲存修改內容", type="primary", use_container_width=True):
                     c_plate = new_plate.strip().upper().replace(" ", "")
                     c_inv = new_inv.strip().upper()
-                    c_spec = new_spec.strip().upper()
+                    c_spec = edit_items_state["oil_m"].strip().upper() if edit_items_state["oil_chk"] else ""
                     c_date_str = str(new_date)
 
                     if not c_plate or not c_inv:
@@ -576,14 +557,7 @@ elif st.session_state.active_view == "edit":
                     elif any(r["id"] != rec_id and (r.get("license_plate") or "").upper() == c_plate and r.get("service_date") == c_date_str for r in oil_records):
                         st.error(f"❌ 修改失敗：車牌 `{c_plate}` 喺 `{c_date_str}` 已經有另一筆紀錄！")
                     else:
-                        updated_packed_notes = pack_items_to_notes(
-                            e_chk_oil, e_p_oil if e_chk_oil else 0,
-                            e_chk_of, e_p_of if e_chk_of else 0,
-                            e_chk_af, e_p_af if e_chk_af else 0,
-                            e_chk_cf, e_p_cf if e_chk_cf else 0,
-                            e_chk_lb, e_p_lb if e_chk_lb else 0,
-                            new_notes
-                        )
+                        updated_packed_notes = pack_items_dict_to_notes(edit_items_state, new_notes)
                         update_data = {
                             "license_plate": c_plate,
                             "invoice_no": c_inv,
@@ -591,7 +565,7 @@ elif st.session_state.active_view == "edit":
                             "current_km": new_ckm,
                             "next_km": new_nkm,
                             "oil_spec": c_spec,
-                            "oil_filter": e_chk_of,
+                            "oil_filter": edit_items_state["of_chk"],
                             "cost": e_calc_total,
                             "notes": updated_packed_notes
                         }
