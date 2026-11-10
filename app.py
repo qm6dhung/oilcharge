@@ -132,6 +132,7 @@ SERVICE_ITEMS = [
     ("ff", "油渣/電油格", "⛽ 油渣格 / 電油格 (Fuel Filter)", "如: 23390-0L070", False, 20),
     ("af", "風隔", "🌬️ 風隔 (Air Filter)", "如: 17801-28030", False, 20),
     ("cf", "冷氣隔", "❄️ 冷氣隔 (Cabin Filter)", "如: 87139-0N010", False, 20),
+    ("sp", "火咀", "⚡ 火咀 (Spark Plugs)", "如: BKR6ERX-11P (4支)", False, 50),
     ("lb", "其他人工", "🛠️ 其他人工 (Labor)", "如: 檢查工時", False, 50),
 ]
 
@@ -195,6 +196,7 @@ def parse_items_from_record(rec):
             "ff": ["油渣/電油格", "油渣格", "電油格", "汽油格"],
             "af": ["風隔", "風格"],
             "cf": ["冷氣隔", "冷氣格"],
+            "sp": ["火咀", "火花塞"],
             "lb": ["其他人工", "人工"],
         }
 
@@ -381,7 +383,7 @@ if st.session_state.active_view == "search":
         st.write("暫時未有符合條件嘅換油紀錄。")
 
 # ==========================================
-# 畫面 B：➕ 新增換油 / 保養紀錄 (含 12 項勾選 ＋ 型號 ＋ 價錢)
+# 畫面 B：➕ 新增換油 / 保養紀錄 (含 13 項勾選 ＋ 型號 ＋ 價錢)
 # ==========================================
 elif st.session_state.active_view == "add":
     st.subheader("➕ 新增換油 / 保養紀錄")
@@ -419,7 +421,7 @@ elif st.session_state.active_view == "add":
 
     st.info(f"💰 **本單自動計算總費用：`$ {calc_total:,} HKD`**")
 
-    notes = st.text_area("其他順便保養項目或備註 (如：洗蝴蝶掩、換火咀、迫力皮)", key=f"add_notes_{fk}")
+    notes = st.text_area("其他順便保養項目或備註 (如：洗蝴蝶掩、迫力皮)", key=f"add_notes_{fk}")
 
     if st.button("💾 儲存保養紀錄", type="primary", use_container_width=True):
         clean_plate = plate_raw.strip().upper().replace(" ", "")
